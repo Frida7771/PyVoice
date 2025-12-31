@@ -1,0 +1,34 @@
+.idea
+.vscode/
+.DS_Store
+
+# 模型文件和库文件（太大，不应该提交）
+*_weights/
+lib/
+temp_models/
+melo_weights/
+paraformer_weights/
+
+# 上传的文件
+uploads/
+*.wav
+output.wav
+
+# Go 编译文件
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+go-speech
+go-speech-server
+
+# 前端构建文件
+web/dist/
+web/node_modules/
+web/.next/
+web/.vite/
+
+# 环境变量
+.env
+.env.local
