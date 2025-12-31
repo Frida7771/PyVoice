@@ -1,8 +1,7 @@
-# GoSpeech
+# PyVoice
 
-GoSpeech is a Python-based speech processing tool that supports both
-speech-to-text (ASR) and text-to-speech (TTS) using ONNX Runtime.
 
+PyVoice is a Python-based speech processing tool that supports both speech-to-text (ASR) and text-to-speech (TTS) using ONNX Runtime.
 This project refactors and extends an open-source speech project into a production-style CLI application, with cross-platform ONNX Runtime integration.
 
 ---
