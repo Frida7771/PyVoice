@@ -147,13 +147,17 @@ def float32_to_pcm_bytes(data: np.ndarray, bits_per_sample: int) -> bytes:
     elif bits_per_sample == 24:
         scale = 8388607.0
         samples = (data * scale).astype(np.int32)
-        # 24-bit Little Endian: [Low, Mid, High]
-        output = bytearray(len(data) * 3)
-        for i, val in enumerate(samples):
-            output[i*3] = val & 0xFF
-            output[i*3+1] = (val >> 8) & 0xFF
-            output[i*3+2] = (val >> 16) & 0xFF
-        return bytes(output)
+        # Vectorized 24-bit Little Endian: [Low, Mid, High]
+        # Extract each byte using bitwise operations
+        b0 = (samples & 0xFF).astype(np.uint8)
+        b1 = ((samples >> 8) & 0xFF).astype(np.uint8)
+        b2 = ((samples >> 16) & 0xFF).astype(np.uint8)
+        # Interleave bytes: [b0_0, b1_0, b2_0, b0_1, b1_1, b2_1, ...]
+        output = np.empty(len(samples) * 3, dtype=np.uint8)
+        output[0::3] = b0
+        output[1::3] = b1
+        output[2::3] = b2
+        return output.tobytes()
     elif bits_per_sample == 32:
         scale = 2147483647.0
         samples = (data * scale).astype(np.int32)
@@ -212,19 +216,16 @@ def pcm_bytes_to_float32(data: bytes, bits_per_sample: int) -> np.ndarray:
         samples = np.frombuffer(data, dtype=np.int16)
         return samples.astype(np.float32) / 32767.0
     elif bits_per_sample == 24:
-        # 24-bit requires special handling
-        samples = []
-        for i in range(num_samples):
-            offset = i * 3
-            b0 = int(data[offset])
-            b1 = int(data[offset + 1])
-            b2 = int(data[offset + 2])
-            val_int = (b2 << 16) | (b1 << 8) | b0
-            # Handle sign bit
-            if val_int & 0x800000:
-                val_int |= 0xFF000000  # Extend sign bit to 32 bits
-            samples.append(val_int)
-        samples = np.array(samples, dtype=np.int32)
+        # Vectorized 24-bit handling
+        raw = np.frombuffer(data, dtype=np.uint8)
+        # Extract bytes: b0[i], b1[i], b2[i] for each sample
+        b0 = raw[0::3].astype(np.int32)
+        b1 = raw[1::3].astype(np.int32)
+        b2 = raw[2::3].astype(np.int32)
+        # Combine bytes: val = (b2 << 16) | (b1 << 8) | b0
+        samples = (b2 << 16) | (b1 << 8) | b0
+        # Sign extension: if bit 23 is set, extend to 32-bit signed
+        samples = np.where(samples & 0x800000, samples | 0xFF000000, samples).astype(np.int32)
         return samples.astype(np.float32) / 8388607.0
     elif bits_per_sample == 32:
         samples = np.frombuffer(data, dtype=np.int32)
@@ -285,7 +286,7 @@ def reformat_wav_bytes(wav_data: bytes, target_rate: int,
 
 def change_channels(data: np.ndarray, src_channel: int, dst_channel: int) -> np.ndarray:
     """
-    Audio data channel conversion
+    Audio data channel conversion (vectorized)
     
     Supports: Stereo(2) -> Mono(1), Mono(1) -> Stereo(2)
     
@@ -300,22 +301,17 @@ def change_channels(data: np.ndarray, src_channel: int, dst_channel: int) -> np.
     if src_channel == dst_channel:
         return data
     
-    # Stereo to Mono
+    # Stereo to Mono: average left and right channels
     if src_channel == 2 and dst_channel == 1:
-        length = len(data) // 2
-        output = np.zeros(length, dtype=np.float32)
-        for i in range(length):
-            l = data[i * 2]
-            r = data[i * 2 + 1]
-            output[i] = (l + r) / 2.0
-        return output
+        left = data[0::2]
+        right = data[1::2]
+        return ((left + right) / 2.0).astype(np.float32)
     
-    # Mono to Stereo
+    # Mono to Stereo: duplicate mono to both channels
     if src_channel == 1 and dst_channel == 2:
-        output = np.zeros(len(data) * 2, dtype=np.float32)
-        for i in range(len(data)):
-            output[i * 2] = data[i]  # L
-            output[i * 2 + 1] = data[i]  # R
+        output = np.empty(len(data) * 2, dtype=np.float32)
+        output[0::2] = data  # L
+        output[1::2] = data  # R
         return output
     
     raise ValueError(f"Unsupported channel conversion: {src_channel} -> {dst_channel}")
@@ -369,7 +365,7 @@ def resample_safe(data: np.ndarray, old_rate: int, new_rate: int, channels: int)
 
 def resample_linear(data: np.ndarray, old_rate: int, new_rate: int) -> np.ndarray:
     """
-    Linear interpolation resampling, suitable for single track continuous data
+    Linear interpolation resampling (vectorized), suitable for single track continuous data
     
     Args:
         data: Raw data
@@ -384,20 +380,9 @@ def resample_linear(data: np.ndarray, old_rate: int, new_rate: int) -> np.ndarra
     
     ratio = old_rate / new_rate
     new_len = int(len(data) / ratio)
-    output = np.zeros(new_len, dtype=np.float32)
     
-    for i in range(new_len):
-        src_idx_float = i * ratio
-        src_idx_int = int(src_idx_float)
-        
-        if src_idx_int >= len(data) - 1:
-            output[i] = data[-1]
-            continue
-        
-        fraction = src_idx_float - src_idx_int
-        sample1 = data[src_idx_int]
-        sample2 = data[src_idx_int + 1]
-        
-        output[i] = sample1 + fraction * (sample2 - sample1)
+    # Vectorized linear interpolation using numpy.interp
+    old_indices = np.arange(len(data))
+    new_indices = np.linspace(0, len(data) - 1, new_len)
     
-    return output
+    return np.interp(new_indices, old_indices, data).astype(np.float32)
