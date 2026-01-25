@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-GoSpeech - Python-based speech processing tool
+PyVoice - Python-based speech processing tool
 Supports speech-to-text (ASR) and text-to-speech (TTS)
 """
 import sys
@@ -84,7 +84,7 @@ def print_usage():
 
 def main():
     """Main function"""
-    parser = argparse.ArgumentParser(description='GoSpeech - Speech processing tool')
+    parser = argparse.ArgumentParser(description='PyVoice - Speech processing tool')
     subparsers = parser.add_subparsers(dest='command', help='Command to run')
     
     # ASR subcommand
