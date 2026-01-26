@@ -2,7 +2,8 @@
 PyVoice FastAPI Server
 
 Endpoints:
-    POST /asr          - Speech to Text
+    POST /asr          - Speech to Text (file upload)
+    WS   /ws/asr       - Streaming ASR (real-time WebSocket)
     POST /tts          - Text to Speech
     GET  /records      - Get all records
     GET  /audio/{id}   - Download audio file
@@ -20,10 +21,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+import tempfile
+import struct
 
 from pyvoice import ASR, TTS
 import subprocess
@@ -283,6 +286,110 @@ async def audio_endpoint(record_id: str):
     raise HTTPException(status_code=404, detail="Audio not found")
 
 
+# ============ WebSocket Streaming ASR ============
+
+@app.websocket("/ws/asr")
+async def websocket_asr(websocket: WebSocket):
+    """
+    WebSocket endpoint for real-time speech recognition.
+    
+    Protocol:
+        1. Client connects
+        2. Client sends audio data (binary, 16kHz 16-bit PCM)
+        3. Server sends back transcription (JSON: {"text": "...", "is_final": bool})
+        4. Client sends "END" text message to finish
+        5. Server sends final result and closes
+    """
+    await websocket.accept()
+    
+    audio_buffer = bytearray()
+    is_connected = True
+    
+    try:
+        while is_connected:
+            try:
+                data = await websocket.receive()
+            except RuntimeError:
+                is_connected = False
+                break
+            
+            if data.get("type") == "websocket.disconnect":
+                is_connected = False
+                break
+            
+            if "text" in data:
+                if data["text"] == "END":
+                    break
+                continue
+            
+            if "bytes" in data:
+                audio_buffer.extend(data["bytes"])
+                
+                # Process every ~3 seconds of audio (16kHz * 2 bytes * 3 sec = 96000 bytes)
+                if len(audio_buffer) >= 96000:
+                    text = process_audio_chunk(audio_buffer)
+                    if text and is_connected:
+                        try:
+                            await websocket.send_json({
+                                "text": text,
+                                "is_final": False
+                            })
+                        except RuntimeError:
+                            is_connected = False
+                            break
+                    audio_buffer.clear()
+        
+        # Final transcription
+        if audio_buffer and is_connected:
+            text = process_audio_chunk(audio_buffer)
+            if text:
+                try:
+                    await websocket.send_json({
+                        "text": text,
+                        "is_final": True
+                    })
+                    await websocket.send_json({"status": "done"})
+                except RuntimeError:
+                    pass
+        
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        print(f"WebSocket error: {e}")
+
+
+def process_audio_chunk(audio_data: bytes) -> str:
+    """Process audio chunk and return transcription"""
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+        # Write WAV header for raw PCM data (16kHz, 16-bit, mono)
+        sample_rate = 16000
+        num_channels = 1
+        bits_per_sample = 16
+        data_size = len(audio_data)
+        
+        f.write(b'RIFF')
+        f.write(struct.pack('<I', 36 + data_size))
+        f.write(b'WAVE')
+        f.write(b'fmt ')
+        f.write(struct.pack('<IHHIIHH', 16, 1, num_channels, sample_rate,
+                           sample_rate * num_channels * bits_per_sample // 8,
+                           num_channels * bits_per_sample // 8, bits_per_sample))
+        f.write(b'data')
+        f.write(struct.pack('<I', data_size))
+        f.write(audio_data)
+        temp_path = f.name
+    
+    try:
+        text = get_asr().recognize(temp_path)
+        return text
+    except Exception as e:
+        print(f"ASR error: {e}")
+        return ""
+    finally:
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
+
+
 # ============ Simple HTML UI ============
 
 HOME_PAGE_HTML = """
@@ -398,8 +505,20 @@ HOME_PAGE_HTML = """
         <!-- ASR Section -->
         <div class="card">
             <h2>🎤 Speech Recognition (ASR)</h2>
+            
+            <!-- Live Recording -->
+            <div style="margin-bottom: 16px;">
+                <button class="btn-asr" id="recordBtn" onclick="toggleRecording()" style="background: linear-gradient(90deg, #ff6b6b, #ee5a5a);">
+                    🎙️ Start Recording
+                </button>
+                <span id="recordStatus" style="margin-left: 12px; color: #888;"></span>
+            </div>
+            
+            <!-- Or upload file -->
+            <div style="margin-bottom: 12px; color: #888; font-size: 14px;">— or upload a file —</div>
             <input type="file" id="audioFile" accept="audio/*">
-            <button class="btn-asr" onclick="doASR()">Recognize Speech</button>
+            <button class="btn-asr" onclick="doASR()">Recognize File</button>
+            
             <div class="loading" id="asrLoading">Recognizing...</div>
             <div class="result" id="asrResult">
                 <strong>Result:</strong>
@@ -436,6 +555,116 @@ HOME_PAGE_HTML = """
     </div>
     
     <script>
+        // ========== Live Recording with WebSocket ==========
+        let isRecording = false;
+        let audioContext = null;
+        let ws = null;
+        
+        async function toggleRecording() {
+            if (isRecording) {
+                stopRecording();
+            } else {
+                await startRecording();
+            }
+        }
+        
+        async function startRecording() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ 
+                    audio: { 
+                        sampleRate: 16000,
+                        channelCount: 1,
+                        echoCancellation: true,
+                        noiseSuppression: true
+                    } 
+                });
+                
+                audioContext = new AudioContext({ sampleRate: 16000 });
+                const source = audioContext.createMediaStreamSource(stream);
+                const processor = audioContext.createScriptProcessor(4096, 1, 1);
+                
+                // Connect WebSocket
+                ws = new WebSocket(`ws://${window.location.host}/ws/asr`);
+                
+                ws.onopen = () => {
+                    document.getElementById('recordStatus').textContent = 'Connected, speak now...';
+                };
+                
+                ws.onmessage = (event) => {
+                    const data = JSON.parse(event.data);
+                    if (data.text) {
+                        const asrText = document.getElementById('asrText');
+                        asrText.textContent += data.text + ' ';
+                        document.getElementById('asrResult').classList.add('show');
+                    }
+                    if (data.status === 'done') {
+                        document.getElementById('recordStatus').textContent = 'Done!';
+                    }
+                };
+                
+                ws.onerror = (e) => {
+                    console.error('WebSocket error:', e);
+                    document.getElementById('recordStatus').textContent = 'Connection error';
+                };
+                
+                // Process audio data
+                processor.onaudioprocess = (e) => {
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                        const inputData = e.inputBuffer.getChannelData(0);
+                        const int16Data = new Int16Array(inputData.length);
+                        for (let i = 0; i < inputData.length; i++) {
+                            int16Data[i] = Math.max(-32768, Math.min(32767, inputData[i] * 32768));
+                        }
+                        ws.send(int16Data.buffer);
+                    }
+                };
+                
+                source.connect(processor);
+                processor.connect(audioContext.destination);
+                
+                // Update UI
+                isRecording = true;
+                document.getElementById('recordBtn').textContent = '⏹️ Stop Recording';
+                document.getElementById('recordBtn').style.background = 'linear-gradient(90deg, #ff4444, #cc3333)';
+                document.getElementById('recordStatus').textContent = 'Connecting...';
+                document.getElementById('asrText').textContent = '';
+                document.getElementById('asrResult').classList.add('show');
+                
+                // Store for cleanup
+                window.currentStream = stream;
+                window.currentProcessor = processor;
+                window.currentSource = source;
+                
+            } catch (e) {
+                alert('Microphone access denied: ' + e.message);
+            }
+        }
+        
+        function stopRecording() {
+            if (window.currentStream) {
+                window.currentStream.getTracks().forEach(track => track.stop());
+            }
+            if (window.currentProcessor) {
+                window.currentProcessor.disconnect();
+            }
+            if (window.currentSource) {
+                window.currentSource.disconnect();
+            }
+            if (audioContext) {
+                audioContext.close();
+            }
+            
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send('END');
+            }
+            
+            isRecording = false;
+            document.getElementById('recordBtn').textContent = '🎙️ Start Recording';
+            document.getElementById('recordBtn').style.background = 'linear-gradient(90deg, #ff6b6b, #ee5a5a)';
+            document.getElementById('recordStatus').textContent = 'Processing...';
+        }
+        
+        // ========== File Upload ASR ==========
         async function doASR() {
             const fileInput = document.getElementById('audioFile');
             if (!fileInput.files.length) {
