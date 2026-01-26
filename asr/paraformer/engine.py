@@ -7,7 +7,7 @@ from typing import Dict, Optional
 import os
 
 from .config import Config
-from .utils import load_tokens, load_cmvn, parse_wav_bytes
+from .utils import load_tokens, load_cmvn, parse_wav_bytes, load_audio_file
 from .feature import extract_features
 import sys
 from pathlib import Path
@@ -46,18 +46,20 @@ class Engine:
             sess_options=sess_options
         )
     
-    def recognize_file(self, wav_path: str) -> str:
+    def recognize_file(self, audio_path: str) -> str:
         """
-        Read WAV file and perform speech recognition
+        Read audio file and perform speech recognition.
+        Supports: WAV, MP3, FLAC, OGG, M4A, AAC, WMA, WEBM
+        
+        Note: Non-WAV formats require ffmpeg installed on the system.
         
         Args:
-            wav_path: Path to audio file
+            audio_path: Path to audio file
         
         Returns:
             Recognized text
         """
-        with open(wav_path, 'rb') as f:
-            wav_bytes = f.read()
+        wav_bytes = load_audio_file(audio_path)
         return self.recognize_bytes(wav_bytes)
     
     def recognize_bytes(self, wav_bytes: bytes) -> str:

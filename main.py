@@ -52,8 +52,10 @@ def run_tts(text: str, out_path: str = None) -> None:
     if out_path is None:
         out_path = "assets/output.wav"
     
-    # Ensure output directory exists
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    # Ensure output directory exists (if path contains directory)
+    out_dir = os.path.dirname(out_path)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
     
     config = TTSConfig(
         model_path="./melo_weights/model.onnx",

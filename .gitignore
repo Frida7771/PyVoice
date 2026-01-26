@@ -9,10 +9,17 @@ temp_models/
 melo_weights/
 paraformer_weights/
 
-# 上传的文件
+# 上传的文件和存储
 uploads/
+storage/
 *.wav
 output.wav
+
+# Python 虚拟环境
+venv/
+.venv/
+__pycache__/
+*.pyc
 
 # Go 编译文件
 *.exe

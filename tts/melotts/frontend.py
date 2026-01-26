@@ -2,7 +2,11 @@
 MeloTTS frontend processing module
 """
 from typing import List, Tuple
+import jieba
 from .config import LexiconItem
+
+# Silence jieba loading messages
+jieba.setLogLevel(jieba.logging.INFO)
 
 
 def text_to_ids(text: str, lexicon: dict, token_map: dict) -> Tuple[List[int], List[int]]:
@@ -122,7 +126,11 @@ def append_token(id_val: int, tone: int, ids: List[int], tones: List[int]) -> No
 
 def smart_segment(text: str) -> List[str]:
     """
-    Simple segmentation logic: distinguish Chinese characters/symbols from English/number words
+    Smart segmentation using jieba for Chinese and rule-based for English/numbers.
+    
+    Benefits of jieba:
+    - Better word boundary detection (e.g., "今天天气" -> ["今天", "天气"] instead of char-by-char)
+    - Improved pronunciation for multi-character words in lexicon
     
     Args:
         text: Input text
@@ -133,21 +141,42 @@ def smart_segment(text: str) -> List[str]:
     segments = []
     buffer = []
     
-    for char in text:
-        # English, numbers, single quotes are processed continuously as part of word
-        if ('a' <= char <= 'z') or ('A' <= char <= 'Z') or ('0' <= char <= '9') or char == '\'':
-            buffer.append(char)
-        else:
-            # Encounter non-English/number, first settle previous buffer
-            if buffer:
-                segments.append(''.join(buffer))
-                buffer = []
-            # Current character as independent segment (Chinese characters, punctuation)
-            segments.append(char)
+    def flush_buffer():
+        """Flush English/number buffer to segments"""
+        if buffer:
+            segments.append(''.join(buffer))
+            buffer.clear()
     
-    # Settle remaining buffer
-    if buffer:
-        segments.append(''.join(buffer))
+    def flush_chinese_buffer(chinese_buffer: List[str]):
+        """Use jieba to segment Chinese text buffer"""
+        if chinese_buffer:
+            chinese_text = ''.join(chinese_buffer)
+            # jieba.cut returns generator, convert to list
+            words = list(jieba.cut(chinese_text))
+            segments.extend(words)
+            chinese_buffer.clear()
+    
+    chinese_buffer = []
+    
+    for char in text:
+        # English, numbers, single quotes -> buffer as word
+        if ('a' <= char <= 'z') or ('A' <= char <= 'Z') or ('0' <= char <= '9') or char == '\'':
+            flush_chinese_buffer(chinese_buffer)
+            buffer.append(char)
+        # Chinese characters -> collect for jieba
+        elif '\u4e00' <= char <= '\u9fff':
+            flush_buffer()
+            chinese_buffer.append(char)
+        # Punctuation and other characters -> flush and add directly
+        else:
+            flush_buffer()
+            flush_chinese_buffer(chinese_buffer)
+            if char.strip():  # Skip whitespace
+                segments.append(char)
+    
+    # Flush remaining buffers
+    flush_buffer()
+    flush_chinese_buffer(chinese_buffer)
     
     return segments
 
