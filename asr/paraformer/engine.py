@@ -7,7 +7,7 @@ from typing import Dict, Optional
 import os
 
 from .config import Config
-from .utils import load_tokens, load_cmvn, parse_wav_bytes, load_audio_file
+from .utils import load_tokens, load_cmvn, parse_wav_bytes, load_audio_file, apply_vad
 from .feature import extract_features
 import sys
 from pathlib import Path
@@ -18,12 +18,13 @@ from onnx_config import OnnxConfig
 class Engine:
     """Encapsulates Paraformer ASR ONNX runtime and related resources"""
     
-    def __init__(self, cfg: Config):
+    def __init__(self, cfg: Config, enable_vad: bool = True):
         """
         Initialize Paraformer ASR engine
         
         Args:
             cfg: Configuration object
+            enable_vad: Whether to enable VAD preprocessing (default True)
         """
         # Initialize ONNX
         onnx_config = OnnxConfig(
@@ -35,6 +36,9 @@ class Engine:
         # Load resources (Tokens and CMVN)
         self.token_map = load_tokens(cfg.tokens_path)
         self.neg_mean, self.inv_std = load_cmvn(cfg.cmvn_path)
+        
+        # VAD settings
+        self.enable_vad = enable_vad
         
         # Create ONNX session
         input_names = ["speech", "speech_lengths"]
@@ -75,18 +79,26 @@ class Engine:
         samples = parse_wav_bytes(wav_bytes)
         return self.recognize(samples)
     
-    def recognize(self, samples: np.ndarray) -> str:
+    def recognize(self, samples: np.ndarray, use_vad: bool = None) -> str:
         """
         Recognize float32 audio sample data
         
         Args:
             samples: 16KHz mono audio data, range [-1, 1]
+            use_vad: Override VAD setting for this call (None = use default)
         
         Returns:
             Recognized text
         """
         if len(samples) == 0:
             raise ValueError("Input audio data is empty")
+        
+        # Apply VAD preprocessing to remove silence
+        should_use_vad = use_vad if use_vad is not None else self.enable_vad
+        if should_use_vad:
+            samples = apply_vad(samples)
+            if len(samples) == 0:
+                return ""
         
         # Feature extraction
         features, feat_len = extract_features(samples, self.neg_mean, self.inv_std)
