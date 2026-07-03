@@ -2,7 +2,6 @@
 
 A Python-based speech processing tool with ASR (Speech-to-Text) and TTS (Text-to-Speech) capabilities, powered by ONNX Runtime.
 
-![Demo](assets/demo.jpg)
 
 ---
 
